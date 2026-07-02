@@ -116,6 +116,17 @@ with app.app_context():
         )
         db.session.commit()
 
+    if DeviceLog.query.first() is None:
+        for d in devices:
+            db.session.add(
+                DeviceLog(
+                    id=d["id"],
+                    nama_perangkat=d["name"],
+                    status=d["status"]
+                )
+            )
+        db.session.commit()
+
 # ==================================================
 # DASHBOARD
 # ==================================================
