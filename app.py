@@ -98,232 +98,202 @@ devices = [
 # ==================================================
 
 from models.sampah import Sampah
+from models.berat_sampah import BeratSampah
+from models.pengambilan import PengambilanSampah
+
 from models.trash_log import TrashLog
 from models.device_log import DeviceLog
 from models.history_log import HistoryLog
-from models.pengambilan_sampah import PengambilanSampah
 
 with app.app_context():
+    print(db.metadata.tables.keys())
     db.create_all()
 
-    # Periksa dan inisialisasi tabel BinStatus jika kosong
-    if BinStatus.query.count() == 0:
-        db.session.add(BinStatus(kategori='Medical', current_volume=0, is_full=False))
-        db.session.add(BinStatus(kategori='Non Medical', current_volume=0, is_full=False))
+with app.app_context():
+    if BinStatus.query.first() is None:
+        db.session.add(
+            BinStatus(id=1)
+        )
         db.session.commit()
 
-# ==================================================
-# INDEX
-# ==================================================
-
-@app.route('/')
-def index():
-    return redirect(url_for("dashboard"))
+    if DeviceLog.query.first() is None:
+        for d in devices:
+            db.session.add(
+                DeviceLog(
+                    id=d["id"],
+                    nama_perangkat=d["name"],
+                    status=d["status"]
+                )
+            )
+        db.session.commit()
 
 # ==================================================
 # DASHBOARD
 # ==================================================
 
-@app.route('/dashboard')
+@app.route('/')
 def dashboard():
-    
-    total_sampah = TrashLog.query.count()
 
-    total_berat_medis = db.session.query(
-        db.func.sum(TrashLog.berat)
-    ).filter_by(
-        kategori='Medical'
-    ).scalar() or 0
+    today = datetime.now(timezone).date()
 
-    total_berat_non_medis = db.session.query(
-        db.func.sum(TrashLog.berat)
-    ).filter_by(
-        kategori='Non Medical'
-    ).scalar() or 0
+    selected_date = request.args.get('date')
 
-    logs = TrashLog.query.order_by(
-        TrashLog.timestamp.desc()
-    ).limit(10).all()
-    
-    # Ambil status tempat sampah
-    medical_bin = BinStatus.query.filter_by(kategori='Medical').first()
-    non_medical_bin = BinStatus.query.filter_by(kategori='Non Medical').first()
+    if selected_date:
+        selected_date = datetime.strptime(
+            selected_date,
+            '%Y-%m-%d'
+        ).date()
+    else:
+        selected_date = today
 
-    return render_template(
-        "dashboard/index.html",
-        total_sampah=total_sampah,
-        total_berat_medis=round(total_berat_medis, 2),
-        total_berat_non_medis=round(total_berat_non_medis, 2),
-        logs=logs,
-        medical_bin=medical_bin,
-        non_medical_bin=non_medical_bin
+    selected_month = request.args.get(
+        'month',
+        selected_date.month,
+        type=int
     )
 
-@app.route('/history/pengambilan', methods=['POST'])
-def get_pengambilan_history():
-    kategori = request.json.get('kategori', 'Medical')
-    
-    # Dapatkan waktu 24 jam yang lalu
-    yesterday = datetime.utcnow() - timedelta(days=1)
-    
-    pengambilan_logs = PengambilanSampah.query.filter(
-        PengambilanSampah.kategori == kategori,
-        PengambilanSampah.timestamp >= yesterday
-    ).order_by(PengambilanSampah.timestamp.desc()).all()
+    selected_year = request.args.get(
+        'year',
+        selected_date.year,
+        type=int
+    )
 
-    return jsonify({
-        "success": True,
-        "logs": [{
-            "timestamp": log.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
-            "berat_sebelumnya": log.berat_sebelumnya,
-            "petugas": log.petugas
-        } for log in pengambilan_logs]
-    })
+    month_matrix = calendar.monthcalendar(
+        selected_year,
+        selected_month
+    )
 
+    month_name = calendar.month_name[
+        selected_month
+    ]
 
-# ==================================================
-# TRASH
-# ==================================================
+    prev_month = selected_month - 1
+    prev_year = selected_year
 
-def is_allowed_file(filename):
-    """
-    Fungsi untuk memeriksa apakah file yang diupload
-    memiliki ekstensi yang diizinkan (.jpg, .jpeg, .png).
-    """
-    
-    ALLOWED_EXTENSIONS = {
-        'png',
-        'jpg',
-        'jpeg'
-    }
+    if prev_month < 1:
+        prev_month = 12
+        prev_year -= 1
 
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    next_month = selected_month + 1
+    next_year = selected_year
 
-@app.route('/api/trash', methods=['POST'])
-def add_trash():
-    """
-    Menerima data dari Raspberry Pi saat sampah dimasukkan.
-    Data yang diterima:
-    - gambar (file)
-    - kategori (Medical / Non Medical)
-    - jenis_sampah (Syringe, Cardboard, dll)
-    - confidence (0.0 - 1.0)
-    - berat (float)
-    """
+    if next_month > 12:
+        next_month = 1
+        next_year += 1
 
-    try:
+    logs = TrashLog.query.filter(
+        db.func.date(
+            TrashLog.created_at
+        ) == selected_date
+    ).order_by(
+        TrashLog.created_at.desc()
+    ).all()
 
-        if 'image' not in request.files:
-            
-            return jsonify({
-                "success": False,
-                "message": "Tidak ada file gambar"
-            }), 400
+    total_trash = len(logs)
 
-        file = request.files['image']
-        
-        if file.filename == '':
-            
-            return jsonify({
-                "success": False,
-                "message": "Nama file kosong"
-            }), 400
+    medis_count = len([
+        log for log in logs
+        if log.kategori == 'Medical'
+    ])
 
-        kategori = request.form.get('kategori')
-        jenis_sampah = request.form.get('jenis_sampah')
-        confidence = request.form.get('confidence')
-        berat = request.form.get('berat', type=float, default=0.0)
+    non_medis_count = len([
+        log for log in logs
+        if log.kategori == 'Non Medical'
+    ])
 
-        if not all([kategori, jenis_sampah, confidence]):
-            return jsonify({
-                "success": False,
-                "message": "Data tidak lengkap"
-            }), 400
+    # ==========================================
+    # PAGE TITLE
+    # ==========================================
 
-        if file and is_allowed_file(file.filename):
-
-            unique_filename = f"{uuid.uuid4().hex}_{secure_filename(file.filename)}"
-            filepath = os.path.join(UPLOAD_FOLDER, unique_filename)
-
-            file.save(filepath)
-
-            # Tambahkan logika untuk memperbarui BinStatus
-            bin_status = BinStatus.query.filter_by(kategori=kategori).first()
-            if bin_status:
-                bin_status.current_volume += berat
-                if bin_status.current_volume >= bin_status.max_capacity:
-                    bin_status.is_full = True
-                    # Opsional: Kirim notifikasi via socketio
-                    socketio.emit("bin_full", {
-                        "kategori": kategori,
-                        "message": f"Tempat sampah {kategori} penuh!"
-                    })
-                db.session.commit()
-
-            new_trash = TrashLog(
-                kategori=kategori,
-                jenis_sampah=jenis_sampah,
-                confidence=float(confidence),
-                image_path=f"uploads/history/{unique_filename}",
-                berat=berat
-            )
-
-            db.session.add(new_trash)
-            db.session.commit()
-
-            socketio.emit("new_trash", {
-                "id": new_trash.id,
-                "kategori": new_trash.kategori,
-                "jenis_sampah": new_trash.jenis_sampah,
-                "confidence": new_trash.confidence,
-                "image_path": new_trash.image_path,
-                "berat": new_trash.berat,
-                "timestamp": new_trash.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-            })
-
-            return jsonify({
-                "success": True,
-                "message": "Data berhasil disimpan"
-            }), 201
-
-        return jsonify({
-            "success": False,
-            "message": "Tipe file tidak diizinkan"
-        }), 400
-
-    except Exception as e:
-
-        return jsonify({
-            "success": False,
-            "message": str(e)
-        }), 500
-
-@app.route('/api/empty_bin', methods=['POST'])
-def empty_bin():
-    kategori = request.json.get('kategori')
-    if not kategori:
-        return jsonify({"success": False, "message": "Kategori tidak ditentukan"}), 400
-
-    bin_status = BinStatus.query.filter_by(kategori=kategori).first()
-    if bin_status:
-        berat_sebelumnya = bin_status.current_volume
-        bin_status.current_volume = 0
-        bin_status.is_full = False
-        
-        # Tambahkan log pengambilan sampah
-        pengambilan = PengambilanSampah(
-            kategori=kategori,
-            berat_sebelumnya=berat_sebelumnya,
-            petugas="Admin" # Bisa disesuaikan dengan sistem login nanti
+    if selected_date == today:
+        page_title = "Today Trash Statistics"
+    else:
+        page_title = selected_date.strftime(
+            "Trash Statistics - %d %B %Y"
         )
-        db.session.add(pengambilan)
-        db.session.commit()
-        
-        socketio.emit("bin_emptied", {"kategori": kategori})
-        return jsonify({"success": True})
-        
-    return jsonify({"success": False, "message": "Kategori tidak ditemukan"}), 404
+
+    # ==========================================
+    # CHART DATA
+    # ==========================================
+
+    chart_result = db.session.query(
+        db.func.date(TrashLog.created_at),
+        TrashLog.kategori,
+        db.func.count(TrashLog.id)
+    ).group_by(
+        db.func.date(TrashLog.created_at),
+        TrashLog.kategori
+    ).all()
+
+    chart_data = {}
+
+    for tanggal, kategori, jumlah in chart_result:
+        tanggal = tanggal.strftime('%d %b')
+        if tanggal not in chart_data:
+            chart_data[tanggal] = {
+                'Medical':0,
+                'Non Medical':0
+            }
+        chart_data[tanggal][kategori] = jumlah
+
+    chart_labels = list(chart_data.keys())
+
+    medical_series = [
+        chart_data[x]['Medical']
+        for x in chart_labels
+    ]
+
+    non_medical_series = [
+        chart_data[x]['Non Medical']
+        for x in chart_labels
+    ]
+
+    hour_labels = []
+    medical_hourly = []
+    non_medical_hourly = []
+
+    for jam in range(24):
+        hour_labels.append(f"{jam:02d}:00")
+
+        medis = TrashLog.query.filter(
+            db.func.date(TrashLog.created_at) == selected_date,
+            db.func.hour(TrashLog.created_at) == jam,
+            TrashLog.kategori == 'Medical'
+        ).count()
+
+        non_medis = TrashLog.query.filter(
+            db.func.date(TrashLog.created_at) == selected_date,
+            db.func.hour(TrashLog.created_at) == jam,
+            TrashLog.kategori == 'Non Medical'
+        ).count()
+
+        medical_hourly.append(medis)
+        non_medical_hourly.append(non_medis)
+
+    return render_template(
+        'dashboard/index.html',
+        chart_labels=chart_labels,
+        medical_series=medical_series,
+        non_medical_series=non_medical_series,
+        hour_labels=hour_labels,
+        medical_hourly=medical_hourly,
+        non_medical_hourly=non_medical_hourly,
+        logs=logs,
+        today=today,
+        selected_date=selected_date,
+        total_trash=total_trash,
+        medis_count=medis_count,
+        non_medis_count=non_medis_count,
+        month_matrix=month_matrix,
+        month_name=month_name,                                              
+        selected_month=selected_month,
+        selected_year=selected_year,
+        prev_month=prev_month,
+        prev_year=prev_year,
+        next_month=next_month,
+        next_year=next_year,
+        page_title=page_title
+    )
 
 # ==================================================
 # ANALYTICS
@@ -331,59 +301,82 @@ def empty_bin():
 
 @app.route('/analytics')
 def analytics():
-    
-    # Ambil data statistik dari database (contoh: 7 hari terakhir)
-    today = datetime.utcnow()
-    seven_days_ago = today - timedelta(days=7)
 
-    # 1. Total sampah per kategori dalam 7 hari
-    daily_stats = db.session.query(
-        db.func.date(TrashLog.timestamp).label('date'),
-        TrashLog.kategori,
-        db.func.count(TrashLog.id).label('count')
-    ).filter(
-        TrashLog.timestamp >= seven_days_ago
-    ).group_by(
-        db.func.date(TrashLog.timestamp),
-        TrashLog.kategori
-    ).all()
+    today = datetime.now(timezone)
 
-    # 2. Distribusi jenis sampah (Medical vs Non-Medical)
-    category_distribution = db.session.query(
-        TrashLog.kategori,
-        db.func.count(TrashLog.id).label('count')
-    ).group_by(
-        TrashLog.kategori
-    ).all()
+    # awal minggu (Senin)
+    start_week = today - timedelta(days=today.weekday())
 
-    # 3. Akurasi rata-rata per jenis sampah
-    accuracy_stats = db.session.query(
-        TrashLog.jenis_sampah,
-        db.func.avg(TrashLog.confidence).label('avg_confidence')
-    ).group_by(
-        TrashLog.jenis_sampah
-    ).all()
+    # total sampah minggu ini
+    total_week = TrashLog.query.filter(
+        TrashLog.created_at >= start_week
+    ).count()
 
-    # 4. Ringkasan hari ini
-    today_start = today.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_stats = db.session.query(
-        db.func.count(TrashLog.id).label('total'),
-        db.func.sum(TrashLog.berat).label('total_berat')
-    ).filter(
-        TrashLog.timestamp >= today_start
-    ).first()
+    # medis & non medis minggu ini
+    medical_count = TrashLog.query.filter(
+        TrashLog.created_at >= start_week,
+        TrashLog.kategori == "Medical"
+    ).count()
 
-    # Ambil 5 log terakhir untuk aktivitas terbaru
+    # rata-rata per hari minggu ini
+    non_medical_count = TrashLog.query.filter(
+        TrashLog.created_at >= start_week,
+        TrashLog.kategori == "Non Medical"
+    ).count()
+
+    avg_daily = round(total_week / 7, 1)
+
+    # contoh error device
+    error_count = DeviceLog.query.filter(
+        DeviceLog.status == "ERROR"
+    ).count()
+
+    # ==========================
+    # CHART MINGGUAN
+    # ==========================
+
+    labels = []
+    medical_series = []
+    non_medical_series = []
+
+    for i in range(7):
+        day = start_week + timedelta(days=i)
+        labels.append(
+            day.strftime("%a")
+        )
+
+        medis = TrashLog.query.filter(
+            db.func.date(
+                TrashLog.created_at
+            ) == day.date(),
+            TrashLog.kategori == "Medical"
+        ).count()
+
+        nonmedis = TrashLog.query.filter(
+            db.func.date(
+                TrashLog.created_at
+            ) == day.date(),
+            TrashLog.kategori == "Non Medical"
+        ).count()
+
+        medical_series.append(medis)
+        non_medical_series.append(nonmedis)
+
+    # tabel terbaru
     latest_logs = TrashLog.query.order_by(
-        TrashLog.timestamp.desc()
-    ).limit(5).all()
+        TrashLog.created_at.desc()
+    ).limit(10).all()
 
     return render_template(
-        "analytics/index.html",
-        daily_stats=daily_stats,
-        category_distribution=category_distribution,
-        accuracy_stats=accuracy_stats,
-        today_stats=today_stats,
+        'analytics/index.html',
+        total_week=total_week,
+        avg_daily=avg_daily,
+        error_count=error_count,
+        medical_count=medical_count,
+        non_medical_count=non_medical_count,
+        labels=labels,
+        medical_series=medical_series,
+        non_medical_series=non_medical_series,
         latest_logs=latest_logs
     )
 
@@ -399,4 +392,242 @@ def seed_devices():
         {"nama_perangkat": "Raspberry Pi", "status": "OFF"},
         {"nama_perangkat": "Camera", "status": "OFF"},
         {"nama_perangkat": "Ultrasonic Medis", "status": "OFF"},
-        {"nama_perangkat": "Ultrasonic Non Medis", "status
+        {"nama_perangkat": "Ultrasonic Non Medis", "status": "OFF"},
+        {"nama_perangkat": "Loadcell Medis", "status": "OFF"},
+        {"nama_perangkat": "Loadcell Non Medis", "status": "OFF"}
+    ]
+    
+    for d in devices_data:
+        device = DeviceLog(nama_perangkat=d["nama_perangkat"], status=d["status"])
+        db.session.add(device)
+        
+    db.session.commit()
+    return "Data perangkat berhasil di-update. Silakan kembali ke /devices."
+
+
+@app.route('/devices')
+def devices_page():
+
+    devices = DeviceLog.query.all()
+
+    error_devices = [
+        d for d in devices
+        if d.status == "ERROR"
+    ]
+
+    return render_template(
+        "devices/index.html",
+        devices=devices,
+        error_devices=error_devices
+    )
+
+@app.route("/api/device/status", methods=["POST"])
+def update_device():
+    try:
+        data = request.get_json()
+        
+        if not data or "device" not in data:
+            return jsonify(success=False, message="Data tidak lengkap"), 400
+
+        device = DeviceLog.query.filter_by(
+            nama_perangkat=data["device"]
+        ).first()
+
+        if device:
+            device.status = data["status"]
+            device.last_seen = datetime.now()
+            db.session.commit()
+            return jsonify(success=True)
+            
+        return jsonify(success=False, message="Device tidak ditemukan"), 404
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error di update_device: {str(e)}")
+        return jsonify(success=False, error=str(e)), 500
+
+@app.route('/device/toggle/<int:device_id>', methods=["POST"])
+def toggle_device(device_id):
+
+    device = DeviceLog.query.get(device_id)
+
+    if device:
+        if device.status == "ON":
+            device.status = "OFF"
+        else:
+            device.status = "ON"
+        db.session.commit()
+
+    return redirect(url_for("devices_page"))
+
+@app.route("/api/device")
+def device_api():
+    try:
+        devices = DeviceLog.query.all()
+        
+        device_list = [
+            {
+                "id": d.id,
+                "device": d.nama_perangkat,
+                "status": d.status
+            }
+            for d in devices
+        ]
+        
+        # Diubah menjadi format Dictionary agar script poller di Pi tidak crash '.get'
+        return jsonify({"success": True, "devices": device_list})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/weight", methods=["POST"])
+def api_weight():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify(success=False, message="No data received"), 400
+            
+        status = BinStatus.query.get(1)
+        if not status:
+            status = BinStatus(id=1)
+            db.session.add(status)
+            
+        status.berat_medis = data.get("medis", 0)
+        status.berat_non_medis = data.get("non_medis", 0)
+        
+        db.session.commit()
+        return jsonify(success=True)
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error di api_weight: {str(e)}")
+        return jsonify(success=False, error=str(e)), 500
+
+@app.route("/api/capacity", methods=["POST"])
+def api_capacity():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify(success=False, message="No data received"), 400
+            
+        status = BinStatus.query.get(1)
+        if not status:
+            status = BinStatus(id=1)
+            db.session.add(status)
+            
+        status.jarak_medis = data["medis"]["jarak"]
+        status.status_medis = data["medis"]["status"]
+        status.jarak_non_medis = data["non_medis"]["jarak"]
+        status.status_non_medis = data["non_medis"]["status"]
+        
+        db.session.commit()
+        return jsonify(success=True)
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error di api_capacity: {str(e)}")
+        return jsonify(success=False, error=str(e)), 500   
+
+# ==================================================
+# HISTORY
+# ==================================================
+
+@app.route('/history')
+def history():
+
+    kategori = request.args.get('kategori')
+    tanggal = request.args.get('tanggal')
+    jenis = request.args.get('jenis')
+
+    query = TrashLog.query
+
+    if kategori and kategori != "Semua":
+        query = query.filter(
+            TrashLog.kategori == kategori
+        )
+
+    if jenis and jenis != "Semua":
+        query = query.filter(
+            TrashLog.jenis_sampah == jenis
+        )
+
+    if tanggal:
+        query = query.filter(
+            db.func.date(
+                TrashLog.created_at
+            ) == tanggal
+        )
+
+    logs = query.order_by(
+        TrashLog.created_at.desc()
+    ).all()
+
+    return render_template(
+        'history/index.html',
+        logs=logs
+    )
+
+@app.route("/api/trash", methods=["POST"])
+def api_trash():
+
+    print("===== API TRASH DIPANGGIL =====")
+
+    kategori = request.form.get("kategori")
+    jenis = request.form.get("jenis_sampah")
+    confidence = float(request.form.get("confidence"))
+
+    image = request.files["image"]
+
+    print(kategori)
+    print(jenis)
+    print(confidence)
+    print(image.filename)
+
+    filename = datetime.now().strftime(
+        "%Y%m%d_%H%M%S_%f.jpg"
+    )
+
+    filename = secure_filename(filename)
+
+    image.save(
+        os.path.join(
+            UPLOAD_FOLDER,
+            filename
+        )
+    )
+
+    image_path = f"uploads/history/{filename}"
+
+    log = TrashLog(
+        kategori=kategori,
+        jenis_sampah=jenis,
+        confidence=confidence,
+        image_path=image_path
+    )
+
+    db.session.add(log)
+    db.session.commit()
+
+    socketio.emit(
+        "new_trash",
+        {
+            "kategori":kategori,
+            "jenis":jenis,
+            "confidence":confidence,
+            "image":image_path,
+            "time":log.created_at.strftime("%H:%M"),
+            "date":log.created_at.strftime("%d %b %Y")
+        }
+    )
+
+    return jsonify({
+        "success":True
+    })
+
+# ==================================================
+# RUN
+# ==================================================
+
+if __name__ == '__main__':
+    socketio.run(
+        app,
+        host='0.0.0.0',
+        port=8003,
+        debug=True
+    )
