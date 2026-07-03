@@ -103,6 +103,8 @@ def log_error(msg: str):
 # =====================================================================
 recalibrate_flag = threading.Event()
 shutdown_event = threading.Event()
+raspberry_enabled = threading.Event()
+raspberry_enabled.set()
 
 # Semua sensor default = Menyala (Set)
 camera_enabled = threading.Event()
@@ -355,7 +357,7 @@ def thread_kamera():
 
     try:
         while not shutdown_event.is_set():
-            if not camera_enabled.is_set():
+            if not raspberry_enabled.is_set() or not camera_enabled.is_set():
                 time.sleep(0.5)
                 continue
 
@@ -549,6 +551,10 @@ def thread_ultrasonic():
         return "Kosong"
 
     while not shutdown_event.is_set():
+        if not raspberry_enabled.is_set():
+            time.sleep(1.0)
+            continue
+            
         try:
             j_medis = None
             j_non_medis = None
@@ -606,6 +612,10 @@ def thread_timbangan():
     berat_n_prev = 0.0
 
     while not shutdown_event.is_set():
+        if not raspberry_enabled.is_set():
+            time.sleep(1.0)
+            continue
+            
         try:
             tampil_m = 0.0
             tampil_n = 0.0
@@ -724,10 +734,12 @@ def thread_device_control_poller():
                             print("[POLLER] MEMATIKAN Sensor Load Cell Non-Medis.")
                             
                     elif nama_perangkat == "Sensor Raspberry Pi":
-                        if not status_on:
-                            # Jika sensor utama Raspberry di-OFF, hentikan seluruh sistem dengan aman
-                            print("[POLLER] Website memerintahkan SHUTDOWN Raspberry Pi Script!")
-                            shutdown_event.set()
+                        if status_on and not raspberry_enabled.is_set():
+                            raspberry_enabled.set()
+                            print("[POLLER] MENGHIDUPKAN KEMBALI Seluruh Sensor Raspberry Pi.")
+                        elif not status_on and raspberry_enabled.is_set():
+                            raspberry_enabled.clear()
+                            print("[POLLER] PAUSE/MEMATIKAN SEMENTARA Seluruh Sensor Raspberry Pi.")
                             
         except Exception as e:
             print(f"[POLLER-ERROR] Gagal membaca status kontrol dari Website: {e}")
