@@ -5,7 +5,8 @@ API = "http://192.168.1.10:5000/api/device"
 
 while True:
 
-    devices = requests.get(API).json()
+    response = requests.get(API).json()
+    devices = response.get("devices", []) if response.get("success") else []
 
     for d in devices:
 
